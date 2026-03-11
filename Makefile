@@ -1,8 +1,8 @@
 CXX= g++
-CXXFLAGS= -std=c++11 -D_VARIADIC_MAX=10
+CXXFLAGS= -std=c++14
 
 INCLUDE= -I./include
-LIB= -lpthread
+LIB= -lncursesw -lpthread
 
 SRCDIR= src
 OBJDIR= obj
