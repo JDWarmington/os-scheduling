@@ -5,17 +5,17 @@ SchedulerConfig* scr::readConfigFile(const char *filename)
     std::string line;
     std::ifstream file(filename);
     SchedulerConfig *config = new SchedulerConfig();
-    
+
     // read line 1 --> number of cpu cores
     std::getline(file, line);
     config->cores = std::stoi(line);
 
     // read line 2 --> scheduling algorithm
     std::getline(file, line);
-    if      (line == "FCFS") config->algorithm = ScheduleAlgorithm::FCFS;
-    else if (line == "SJF")  config->algorithm = ScheduleAlgorithm::SJF;
-    else if (line == "RR")   config->algorithm = ScheduleAlgorithm::RR;
-    else if (line == "PP")   config->algorithm = ScheduleAlgorithm::PP;
+    if      (line == "FCFS") config->algorithm = FCFS;
+    else if (line == "SJF")  config->algorithm = SJF;
+    else if (line == "RR")   config->algorithm = RR;
+    else if (line == "PP")   config->algorithm = PP;
 
     // read line 3 --> context switch time (ms)
     std::getline(file, line);
@@ -34,6 +34,7 @@ SchedulerConfig* scr::readConfigFile(const char *filename)
     int i, j;
     std::string item1, item2;
     std::stringstream ss1, ss2;
+
     for (i = 0; i < config->num_processes; i++)
     {
         std::getline(file, line);
@@ -52,6 +53,7 @@ SchedulerConfig* scr::readConfigFile(const char *filename)
         std::getline(ss1, item1, ',');
         config->processes[i].num_bursts = std::count(item1.begin(), item1.end(), '|') + 1;
         config->processes[i].burst_times = new uint32_t[config->processes[i].num_bursts];
+
         ss2.clear();
         ss2.str(item1);
         for (j = 0; j < config->processes[i].num_bursts; j++)
@@ -62,7 +64,7 @@ SchedulerConfig* scr::readConfigFile(const char *filename)
 
         // column 4 --> priority
         std::getline(ss1, item1, ',');
-        if (config->algorithm == ScheduleAlgorithm::PP)
+        if (config->algorithm == PP)
         {
             config->processes[i].priority = std::stoi(item1);
         }
