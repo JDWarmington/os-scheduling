@@ -11,10 +11,6 @@
 #include "configreader.h"
 #include "process.h"
 
-// JACKSON : I ran it with the following commands
-// g++ -std=c++17 main.cpp process.cpp configreader.cpp -lncurses -pthread -o scheduler
-// ./scheduler ../resrc/config_01.txt
-
 // Shared data for all cores
 typedef struct SchedulerData {
     std::mutex queue_mutex;
@@ -25,13 +21,52 @@ typedef struct SchedulerData {
     bool all_terminated;
 } SchedulerData;
 
-void insertReadyProcess(SchedulerData *data, Process *process);
+// Forward declarations
+void insertReadyQueue(SchedulerData *data, Process *process);
 void coreRunProcesses(uint8_t core_id, SchedulerData *data);
 void printProcessOutput(std::vector<Process*>& processes);
 std::string makeProgressString(double percent, uint32_t width);
 uint64_t currentTime();
 std::string processStateToString(Process::State state);
 
+// ---------------------------------------------------------------------------
+// insertReadyQueue
+//   Inserts a process into the ready queue per the scheduling algorithm.
+//   MUST be called while queue_mutex is already held (no internal locking).
+// ---------------------------------------------------------------------------
+void insertReadyQueue(SchedulerData *data, Process *process)
+{
+    // FCFS and RR: simply append to the back of the queue
+    if (data->algorithm == FCFS || data->algorithm == RR)
+    {
+        data->ready_queue.push_back(process);
+        return;
+    }
+
+    // SJF: sorted by total remaining CPU time (shortest first)
+    // PP:  sorted by priority number (0 = highest priority)
+    //      ties broken by FCFS order
+    std::list<Process*>::iterator it = data->ready_queue.begin();
+    for (; it != data->ready_queue.end(); ++it)
+    {
+        if (data->algorithm == SJF)
+        {
+            if (process->getRemainingTime() < (*it)->getRemainingTime())
+                break;
+        }
+        else if (data->algorithm == PP)
+        {
+            if (process->getPriority() < (*it)->getPriority())
+                break;
+        }
+    }
+
+    data->ready_queue.insert(it, process);
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -55,6 +90,7 @@ int main(int argc, char *argv[])
 
     uint64_t start = currentTime();
 
+    // Build process list; immediately-ready processes go into the ready queue
     for (i = 0; i < config->num_processes; i++)
     {
         Process *p = new Process(config->processes[i], start);
@@ -62,23 +98,27 @@ int main(int argc, char *argv[])
 
         if (p->getState() == Process::Ready)
         {
-            insertReadyProcess(shared_data, p);
+            std::lock_guard<std::mutex> lock(shared_data->queue_mutex);
+            insertReadyQueue(shared_data, p);
         }
     }
 
     scr::deleteConfig(config);
 
+    // Launch one scheduling thread per CPU core
     std::thread *schedule_threads = new std::thread[num_cores];
     for (i = 0; i < num_cores; i++)
     {
         schedule_threads[i] = std::thread(coreRunProcesses, i, shared_data);
     }
 
+    // Ncurses setup
     initscr();
     cbreak();
     noecho();
     curs_set(0);
 
+    // Main monitor loop
     while (!(shared_data->all_terminated))
     {
         uint64_t now = currentTime();
@@ -99,7 +139,7 @@ int main(int argc, char *argv[])
                         {
                             p->setState(Process::Ready, now);
                             p->setBurstStartTime(now);
-                            insertReadyProcess(shared_data, p);
+                            insertReadyQueue(shared_data, p);
                             newly_ready.push_back(p);
                         }
                         all_done = false;
@@ -118,7 +158,7 @@ int main(int argc, char *argv[])
                         p->updateProcess(now);
                         if (p->getState() == Process::Ready)
                         {
-                            insertReadyProcess(shared_data, p);
+                            insertReadyQueue(shared_data, p);
                             newly_ready.push_back(p);
                         }
                         else if (p->getState() == Process::IO)
@@ -140,6 +180,7 @@ int main(int argc, char *argv[])
                 }
             }
 
+            // Round Robin: time-slice interrupt
             if (shared_data->algorithm == RR)
             {
                 for (Process *p : processes)
@@ -152,11 +193,12 @@ int main(int argc, char *argv[])
                     }
                 }
             }
+            // Preemptive Priority: interrupt a lower-priority running process
             else if (shared_data->algorithm == PP)
             {
                 for (Process *ready_p : newly_ready)
                 {
-                    Process *victim = NULL;
+                    Process *victim = nullptr;
 
                     for (Process *running_p : processes)
                     {
@@ -164,7 +206,7 @@ int main(int argc, char *argv[])
                             !running_p->isInterrupted() &&
                             ready_p->getPriority() < running_p->getPriority())
                         {
-                            if (victim == NULL ||
+                            if (victim == nullptr ||
                                 running_p->getPriority() > victim->getPriority())
                             {
                                 victim = running_p;
@@ -172,7 +214,7 @@ int main(int argc, char *argv[])
                         }
                     }
 
-                    if (victim != NULL)
+                    if (victim != nullptr)
                     {
                         victim->interrupt();
                     }
@@ -187,11 +229,13 @@ int main(int argc, char *argv[])
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
+    // Wait for all worker threads
     for (i = 0; i < num_cores; i++)
     {
         schedule_threads[i].join();
     }
 
+    // Final statistics
     erase();
 
     double total_cpu_time = 0.0;
@@ -243,6 +287,7 @@ int main(int argc, char *argv[])
     refresh();
     getch();
 
+    // Cleanup
     for (Process *p : processes)
     {
         delete p;
@@ -256,37 +301,10 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-void insertReadyProcess(SchedulerData *data, Process *process)
-{
-    if (data->algorithm == FCFS || data->algorithm == RR)
-    {
-        data->ready_queue.push_back(process);
-        return;
-    }
-
-    std::list<Process*>::iterator it = data->ready_queue.begin();
-
-    for (; it != data->ready_queue.end(); ++it)
-    {
-        if (data->algorithm == SJF)
-        {
-            if (process->getRemainingTime() < (*it)->getRemainingTime())
-            {
-                break;
-            }
-        }
-        else if (data->algorithm == PP)
-        {
-            if (process->getPriority() < (*it)->getPriority())
-            {
-                break;
-            }
-        }
-    }
-
-    data->ready_queue.insert(it, process);
-}
-
+// ---------------------------------------------------------------------------
+// coreRunProcesses
+//   Worker thread for one CPU core.
+// ---------------------------------------------------------------------------
 void coreRunProcesses(uint8_t core_id, SchedulerData *shared_data)
 {
     const uint32_t tick_ms = 5;
@@ -294,8 +312,9 @@ void coreRunProcesses(uint8_t core_id, SchedulerData *shared_data)
 
     while (!(shared_data->all_terminated))
     {
-        Process *p = NULL;
+        Process *p = nullptr;
 
+        // Pull next ready process
         {
             std::lock_guard<std::mutex> lock(shared_data->queue_mutex);
             if (!shared_data->ready_queue.empty())
@@ -305,12 +324,13 @@ void coreRunProcesses(uint8_t core_id, SchedulerData *shared_data)
             }
         }
 
-        if (p == NULL)
+        if (p == nullptr)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(tick_ms));
             continue;
         }
 
+        // Context switch in
         if (switch_half > 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(switch_half));
@@ -325,6 +345,7 @@ void coreRunProcesses(uint8_t core_id, SchedulerData *shared_data)
             p->setBurstStartTime(now);
         }
 
+        // Run until completion of burst or interruption
         while (true)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(tick_ms));
@@ -347,24 +368,28 @@ void coreRunProcesses(uint8_t core_id, SchedulerData *shared_data)
             std::lock_guard<std::mutex> lock(shared_data->queue_mutex);
             p->setCpuCore(-1);
 
+            // Interrupted while still running -> put back into ready queue
             if (p->getState() == Process::Running && p->isInterrupted())
             {
                 p->interruptHandled();
                 p->setState(Process::Ready, now);
                 p->setBurstStartTime(now);
-                insertReadyProcess(shared_data, p);
+                insertReadyQueue(shared_data, p);
             }
             else
             {
                 p->interruptHandled();
 
+                // If it naturally transitioned to Ready (e.g., IO finished later),
+                // ensure it's reinserted.
                 if (p->getState() == Process::Ready)
                 {
-                    insertReadyProcess(shared_data, p);
+                    insertReadyQueue(shared_data, p);
                 }
             }
         }
 
+        // Context switch out
         if (switch_half > 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(switch_half));
@@ -372,6 +397,9 @@ void coreRunProcesses(uint8_t core_id, SchedulerData *shared_data)
     }
 }
 
+// ---------------------------------------------------------------------------
+// printProcessOutput
+// ---------------------------------------------------------------------------
 void printProcessOutput(std::vector<Process*>& processes)
 {
     printw("|   PID | Priority |    State    | Core |               Progress               |\n");
@@ -405,6 +433,9 @@ void printProcessOutput(std::vector<Process*>& processes)
     refresh();
 }
 
+// ---------------------------------------------------------------------------
+// makeProgressString
+// ---------------------------------------------------------------------------
 std::string makeProgressString(double percent, uint32_t width)
 {
     if (percent < 0.0) percent = 0.0;
@@ -416,6 +447,9 @@ std::string makeProgressString(double percent, uint32_t width)
     return progress_bar;
 }
 
+// ---------------------------------------------------------------------------
+// currentTime
+// ---------------------------------------------------------------------------
 uint64_t currentTime()
 {
     uint64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -423,6 +457,9 @@ uint64_t currentTime()
     return ms;
 }
 
+// ---------------------------------------------------------------------------
+// processStateToString
+// ---------------------------------------------------------------------------
 std::string processStateToString(Process::State state)
 {
     std::string str;
